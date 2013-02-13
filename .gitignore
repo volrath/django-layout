@@ -3,4 +3,5 @@
 {{ project_name }}/settings/local.py
 {{ project_name }}/settings/local/*
 requirements/local.pip
+server/*/logs/*
 docs/_build
