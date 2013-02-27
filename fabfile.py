@@ -10,34 +10,35 @@ import json, os
 from contextlib import nested
 from datetime import datetime
 
-from fabric.api import (append, cd, env, execute, exists, hide, lcd, local,
-                        prefix, prompt, put, puts, roles, run, settings, sudo,
-                        task)
+from fabric.api import (cd, env, execute, hide, lcd, local, prefix, prompt,
+                        put, puts, roles, run, settings, sudo, task,
+                        with_settings)
 from fabric.colors import cyan, green, red
+from fabric.contrib.files import append, exists
 
 
 # GLOBALS
-# ------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 env.project_name = '{{ project_name }}'
 
 env.repository = 'git@git.talpor.com:{{ project_name }}.git'
 env.local_branch = 'master'
 env.remote_ref = 'origin/master'
 
-env.requirements_file = 'requirements.pip'
-
-env.project_path = '/home/{project_name}/{project_name}/'.format(**env)
+env.project_path = '/home/{project_name}/{project_name}'.format(**env)
 env.venv_path = '/home/{project_name}/.virtualenvs/{project_name}'.format(**env)
 
 env.restart_command = 'supervisorctl restart {project_name}'.format(**env)
 env.restart_sudo = True
 
+env.compass_config = '{project_path}/{project_name}/static/config.rb'.format(**env)
+
 # env.forward_agent = True
 
 
-#===============================================================================
+#==============================================================================
 # Tasks which set up deployment environments
-#===============================================================================
+#==============================================================================
 
 @task
 def prod():
@@ -48,7 +49,11 @@ def prod():
         'db': [env.site_url],
     }
     env.system_users = {env.site_url: env.project_name}
-    env.project_settings = '{project_name}.settings.prod'.format(**env)
+    env.environment = 'prod'
+    env.project_settings = '{project_name}.settings.{environment}'\
+                           .format(**env)
+    env.supervisord = '{project_path}/server/{environment}/supervisord.conf'\
+                      .format(**env)
 
 @task
 def dev():
@@ -59,19 +64,43 @@ def dev():
         'db': [env.site_url],
     }
     env.system_users = {env.site_url: env.project_name}
-    env.project_conf = '{project_name}.conf.dev'.format(**env)
+    env.environment = 'dev'
+    env.project_settings = '{project_name}.settings.{environment}'\
+                           .format(**env)
+    env.supervisord = '{project_path}/server/{environment}/supervisord.conf'\
+                      .format(**env)
+
+@task
+def vgr():
+    """Use the development deployment environment."""
+    env.site_url = '127.0.0.1:8888'
+    env.roledefs = {
+        'web': ['127.0.0.1:2222'],
+        'db': ['127.0.0.1:2222'],
+    }
+    env.system_users = {env.site_url: env.project_name}
+    env.environment = 'dev'
+    env.project_settings = '{project_name}.settings.{environment}'\
+                           .format(**env)
+    env.supervisord = '{project_path}/server/{environment}/supervisord.conf'\
+                      .format(**env)
+    # use vagrant ssh key
+    result = local('vagrant ssh-config | grep IdentityFile', capture=True)
+    env.key_filename = result.split()[1]
 
 
 # Set the default environment.
 dev()
 
 
-#===============================================================================
+#==============================================================================
 # Actual tasks
-#===============================================================================
+#==============================================================================
 
 # BOOTSTRAPPING
-# ------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+@task
+@roles('web', 'db')
 def bootstrap():
     print(cyan('Starting Bootstrap...', bold=True))
     sudo('apt-get -q -y update')
@@ -80,6 +109,8 @@ def bootstrap():
          'build-essential rubygems ruby-bundler')
     sudo('gem install chef --no-ri --no-rdoc')
 
+@task
+@roles('web', 'db')
 def provision():
     project_root = os.path.dirname(env.real_fabfile)
     chef_root = os.path.join(project_root, 'bootstrap')
@@ -87,10 +118,10 @@ def provision():
     chef_archive = '{0}.tar.gz'.format(chef_name)
     local('cp -r {0} /tmp/{1}'.format(chef_root, chef_name))
 
-    with open(os.path.join(chef_root, 'nodes', '%s.json' % env.settings)) as f:
+    with open(os.path.join(chef_root, 'nodes', '%s.json' % env.environment)) as f:
         data = json.load(f)
     project = data.setdefault('project', {})
-    project['environment'] = env.settings
+    project['environment'] = env.environment
     with open('/tmp/{0}/node.json'.format(chef_name), 'w') as f:
         json.dump(data, f)
 
@@ -114,14 +145,16 @@ def provision():
 
     print(cyan('Copying ssh key and doing initial deploy...', bold=True))
     upload_public_key()
-    execute('initial_deploy')
+    execute(initial_deploy)
     print(cyan('Restarting nginx...', bold=True))
     sudo('service nginx restart')
     check()
 
+@task
+@with_settings(user=env.project_name)
 def initial_deploy(action=''):
     # clone repo
-    env.run('chmod 711 /home/{project_name}'.format(**env))
+    run('chmod 711 /home/{project_name}'.format(**env))
 
     if not exists(os.path.join(env.project_path, '.git')):
         with cd(os.path.dirname(os.path.abspath(env.project_path))):
@@ -129,7 +162,7 @@ def initial_deploy(action=''):
             append('/home/%s/.ssh/config' % env.project_name,
                    'Host talpor.com\n\tStrictHostKeyChecking no\n')
             print(cyan('Cloning Repo...', bold=True))
-            env.run('git clone %s %s' % (env.project_repo, env.project_name))
+            run('git clone %s %s' % (env.repository, env.project_name))
     else:
         print(cyan('Repository already cloned', bold=True))
 
@@ -137,27 +170,20 @@ def initial_deploy(action=''):
     if not exists(env.venv_path):
         print(cyan('Creating Virtualenv...', bold=True))
         run('virtualenv %s' % env.venv_path)
-        with cd(env.project_path):
-            run('cat "export GEM_HOME=\"$VIRTUAL_ENV/gems\"" >> '  #
-                '{venv_path}/postactivate'.format(**env))          # Maybe we should
-            run('cat "export GEM_PATH=\"\"" >> '                   # move these to
-                '{venv_path}/postactivate'.format(**env))          # chef.
-            run('bundle install --path vendor/bundle')             #
+        if exists(os.path.join(env.project_path, 'Gemfile')):
+            gem_home = '{venv_path}/gems'.format(**env)
+            run('echo "export GEM_HOME=\'{gem_home}\'" >> '
+                '{venv_path}/bin/postactivate'.format(gem_home=gem_home, **env))
+            run('echo "export GEM_PATH=\'\'" >> '
+                '{venv_path}/bin/postactivate'.format(**env))
+            run('mkdir ' + gem_home)
+            run('source ~/.bash_profile')
+            cmd('bundle install')
     else:
         print(cyan('Virtualenv already exists', bold=True))
 
-    # set owners and modes
-    # FIXME: I think this is not required anymore -- jcc
-    env.run('chown {project_name}:{project_name} -R {project_path}'\
-            .format(**env))
-    env.run('chown {0}:{0} -R {1}'\
-            .format(env.project_name,
-                    os.path.dirname(os.path.abspath(env.venv_path))))
-    env.run('chmod 755 {venv_path}'.format(**env))
-    env.run('chmod 755 {venv_path}'.format(**env))
-
     print(cyan('Deploying...', bold=True))
-    deploy()
+    deploy(action='force')
 
 def upload_public_key():
     path = prompt('Path to your public key? [~/.ssh/id_rsa.pub]') or \
@@ -179,37 +205,46 @@ def upload_public_key():
 
 
 # BASIC TASKS
-# ------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 @task
 @roles('web', 'db')
-def cmd(cmd=""):
+def cmd(cmd='', path=None):
     """Run a command in the site directory.  Usable from other
     commands or the CLI.
     """
     if not cmd:
-        print(cyan("Command to run: "))
-        cmd = raw_input().strip()
+        cmd = prompt('Command to run:')
     if cmd:
-        with nested(cd(env.site_path),
+        with nested(cd(path or env.project_path),
                     prefix('workon {project_name}'.format(**env))):
-            env.run(cmd)
+            return run(cmd)
 
 @task
 @roles('web', 'db')
 def manage_py(mcmd):
     """Returns a string for a manage.py command execution."""
-    if not cmd:
-        print(cyan("./manage.py: "))
-        mcmd = raw_input().strip()
+    if not mcmd:
+        mcmd = prompt('./manage.py: ')
     if mcmd:
-        return cmd(mcmd + ' --settings={project_settings}'.format(**env))
+        return cmd('python manage.py ' + mcmd +
+                   ' --settings={project_settings}'.format(**env))
 
+@task
+@roles('web', 'db')
+def supervisorctl(scmd):
+    """Returns a string for a supervisorctl command execution."""
+    if not scmd:
+        scmd = prompt('supervisorctl: ')
+    if scmd:
+        return cmd('supervisorctl -c {supervisord} {scmd}'\
+                   .format(scmd=scmd, **env))
 
 # PROJECT MAINTENANCE
-# ------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 @task
-def deploy(verbosity='normal'):
+@roles('web', 'db')
+def deploy(verbosity='normal', action='check'):
     """Full server deploy.
 
     Updates the repository (server-side), synchronizes the database, collects
@@ -222,7 +257,7 @@ def deploy(verbosity='normal'):
 
     with hide(*hide_args):
         puts('Updating repository...')
-        execute(update)
+        execute(update, action=action)
         puts('Collecting static files...')
         execute(collectstatic)
         puts('Synchronizing database...')
@@ -251,15 +286,19 @@ def update(action='check'):
             # No changes, we can exit now.
             return
         if action == 'check':
-            reqs_changed = env.requirements_file in changed_files  # FIX: check for '.pip' files
-            stylesheets_changed = ''  # Fix: check for '.scss' or '.sass' files.
+            reqs_changed = 'requirements/base.pip' in changed_files or \
+                'requirements/{environment}.pip'.format(**env) in changed_files
+            stylesheets_changed = exists(env.compass_config) and bool(filter(
+                lambda f: f.endswith('.sass') or f.endswith('.scss'),
+                changed_files
+            ))
         else:
             reqs_changed = False
             stylesheets_changed = False
 
         run('git merge {remote_ref}'.format(**env))
         run('find -name "*.pyc" -delete')
-        run('git clean -df')
+        # run('git clean -df') # it deletes var.
 
     # Not using execute() because we don't want to run multiple times for
     # each role (since this task gets run per role).
@@ -272,7 +311,8 @@ def update(action='check'):
 @roles('web', 'db')
 def compass():
     """Runs compass compile over the stylesheets."""
-    cmd('compass compile --time --boring -c conf/common/compass.rb')
+    cmd('bundle exec compass compile --time --boring',
+        os.path.dirname(env.compass_config))
 
 
 @task
@@ -290,25 +330,28 @@ def syncdb(sync=True, migrate=True):
 
 @task
 @roles('web')
-def restart():
+def restart(hard=False):
     """Restart the web service."""
-    if env.restart_sudo:
-        cmd = sudo
+    with hide('running', 'stdout'):
+        result = supervisorctl('status')
+    if 'no such file' in result:
+        cmd('supervisord -c {supervisord}'.format(**env))
     else:
-        cmd = run
-    cmd(env.restart_command)
+        supervisorctl('restart all'.format(**env))
+    if hard:
+        sudo('service nginx restart')
     check()
 
 @task
 @roles('web', 'db')
 def requirements():
     """Update the requirements."""
-    cmd('pip install -r {project_path}/requirements/{project_env}.pip'\
+    cmd('pip install -r {project_path}/requirements/{environment}.pip'\
         .format(**env))
 
 
 # HELPERS
-# ------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 def check():
     """Check that the home page of the site returns an HTTP 200."""
