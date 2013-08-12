@@ -28,17 +28,17 @@ DATABASES = {
 # ROOT_URLCONF = '{{ project_name }}.urls.local'
 # WSGI_APPLICATION = '{{ project_name }}.wsgi.local.application'
 
-INSTALLED_APPS += (
-    'debug_toolbar',
-)
+#INSTALLED_APPS += (
+#    'debug_toolbar',
+#)
 
 INTERNAL_IPS = ('127.0.0.1',)
 
-MIDDLEWARE_CLASSES += (
-    'debug_toolbar.middleware.DebugToolbarMiddleware',
-)
+#MIDDLEWARE_CLASSES += (
+#    'debug_toolbar.middleware.DebugToolbarMiddleware',
+#)
 
-DEBUG_TOOLBAR_CONFIG = {
-    'INTERCEPT_REDIRECTS': False,
-    'SHOW_TEMPLATE_CONTEXT': True,
-}
+#DEBUG_TOOLBAR_CONFIG = {
+#    'INTERCEPT_REDIRECTS': False,
+#    'SHOW_TEMPLATE_CONTEXT': True,
+#}

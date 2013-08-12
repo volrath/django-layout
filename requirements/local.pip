@@ -2,6 +2,6 @@
 
 # python helpers
 # -----------------------------------------------------------------------------
-ipython
-#ipdb
-django-debug-toolbar==0.9.4
+# ipython
+# ipdb
+# django-debug-toolbar==0.9.4

@@ -1,7 +1,7 @@
 # This file collects all required third-party applications that are needed
 # to run this project. Later you can install all these apps in a row
 # using pip. Example::
-z#
+#
 #     pip install -r requirements.pip
 
 Django==1.5
@@ -9,7 +9,6 @@ Django==1.5
 
 # django apps
 # -----------------------------------------------------------------------------
-South==0.8.1
-django-braces==1.2.2
-django-model-utils==1.4.0
-logutils==0.3.3
+# South==0.8.1
+# django-braces==1.2.2
+# django-model-utils==1.4.0
